@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "rust-lang",
+    "typescript-lang",
+    "javascript-lang",
+    "python-lang",
+    "go-lang",
+    "vue-lang",
+    "react-lang",
+    "svelte-lang",
+]
+resolver = "2"

@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.svelte-lang"
+name = "Svelte"
+version = "0.1.0"
+description = "Svelte language support — syntax highlighting, runes, svelte-language-server LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["svelte"]
+lsp_server = "svelte-language-server"
+lsp_args = ["--stdio"]
+
+[dependencies]
+npm = ["svelte-language-server"]

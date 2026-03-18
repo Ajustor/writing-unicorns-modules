@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.rust-lang"
+name = "Rust"
+version = "0.1.0"
+description = "Rust language support — syntax highlighting, hover docs, rust-analyzer LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["rs"]
+lsp_server = "rust-analyzer"
+lsp_args = []
+
+[dependencies]
+cargo = ["rust-analyzer"]

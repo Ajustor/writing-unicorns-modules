@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.javascript-lang"
+name = "JavaScript"
+version = "0.1.0"
+description = "JavaScript language support — syntax highlighting, hover docs, typescript-language-server LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["js", "mjs", "jsx"]
+lsp_server = "typescript-language-server"
+lsp_args = ["--stdio"]
+
+[dependencies]
+npm = ["typescript-language-server", "typescript"]

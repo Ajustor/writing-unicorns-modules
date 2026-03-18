@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.go-lang"
+name = "Go"
+version = "0.1.0"
+description = "Go language support — syntax highlighting, hover docs, gopls LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["go"]
+lsp_server = "gopls"
+lsp_args = []
+
+[dependencies]
+go = ["golang.org/x/tools/gopls@latest"]

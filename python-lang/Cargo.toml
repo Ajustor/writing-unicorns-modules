@@ -1,0 +1,12 @@
+[package]
+name = "python-lang"
+version = "0.1.0"
+edition = "2021"
+description = "Python language support module for Writing Unicorns IDE"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+
+[dev-dependencies]

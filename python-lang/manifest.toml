@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.python-lang"
+name = "Python"
+version = "0.1.0"
+description = "Python language support — syntax highlighting, decorators, hover docs, pylsp LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["py", "pyw"]
+lsp_server = "pylsp"
+lsp_args = []
+
+[dependencies]
+pip = ["python-lsp-server"]

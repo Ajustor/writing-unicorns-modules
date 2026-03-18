@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.vue-lang"
+name = "Vue"
+version = "0.1.0"
+description = "Vue SFC language support — syntax highlighting, hover docs, volar LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["vue"]
+lsp_server = "vue-language-server"
+lsp_args = ["--stdio"]
+
+[dependencies]
+npm = ["@vue/language-server"]

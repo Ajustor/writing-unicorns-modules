@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.react-lang"
+name = "React"
+version = "0.1.0"
+description = "React (JSX/TSX) language support — syntax highlighting, React hooks, typescript-language-server LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["jsx", "tsx"]
+lsp_server = "typescript-language-server"
+lsp_args = ["--stdio"]
+
+[dependencies]
+npm = ["typescript-language-server", "typescript"]
