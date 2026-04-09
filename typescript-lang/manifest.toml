@@ -1,13 +1,13 @@
 [extension]
 id = "unicorns.typescript-lang"
 name = "TypeScript"
-version = "0.1.0"
+version = "0.2.0"
 description = "TypeScript language support — syntax highlighting, hover docs, typescript-language-server LSP"
 author = "Writing Unicorns"
 repository = ""
 
 [capabilities]
-languages = ["ts", "tsx"]
+languages = ["ts"]
 lsp_server = "typescript-language-server"
 lsp_args = ["--stdio"]
 

@@ -191,7 +191,7 @@ pub extern "C" fn language_id() -> *const std::ffi::c_char {
 
 #[no_mangle]
 pub extern "C" fn file_extensions() -> *const std::ffi::c_char {
-    c"js,mjs,jsx".as_ptr()
+    c"js,mjs".as_ptr()
 }
 
 /// Tokenize a line of JavaScript code. Returns JSON: [{"text":"...","kind":"keyword"}, ...]

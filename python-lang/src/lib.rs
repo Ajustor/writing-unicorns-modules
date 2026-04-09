@@ -76,9 +76,42 @@ pub fn tokenize_line(line: &str) -> Vec<Token> {
             break;
         }
 
-        // String literal (" or ')
+        // String literal (" or ') — check triple-quote first
         if chars[i] == '"' || chars[i] == '\'' {
             let quote = chars[i];
+
+            // Triple-quoted string (""" or ''')
+            if i + 2 < len && chars[i + 1] == quote && chars[i + 2] == quote {
+                let mut s = String::new();
+                s.push(quote);
+                s.push(quote);
+                s.push(quote);
+                i += 3;
+                loop {
+                    if i + 2 < len && chars[i] == quote && chars[i + 1] == quote && chars[i + 2] == quote {
+                        s.push(quote);
+                        s.push(quote);
+                        s.push(quote);
+                        i += 3;
+                        break;
+                    }
+                    if i >= len {
+                        break; // unterminated triple-quote (continues on next line)
+                    }
+                    if chars[i] == '\\' && i + 1 < len {
+                        s.push(chars[i]);
+                        s.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        s.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                tokens.push(Token { text: s, kind: TokenKind::String });
+                continue;
+            }
+
+            // Single-quoted string
             let mut s = String::new();
             s.push(quote);
             i += 1;
@@ -320,5 +353,23 @@ mod tests {
     fn test_type_keyword() {
         let tokens = tokenize_line("x: int = 0");
         assert!(tokens.iter().any(|t| t.text == "int" && t.kind == TokenKind::KeywordType));
+    }
+
+    #[test]
+    fn test_triple_double_quote() {
+        let tokens = tokenize_line(r#"x = """hello world""""#);
+        assert!(tokens.iter().any(|t| t.text == r#""""hello world""""# && t.kind == TokenKind::String));
+    }
+
+    #[test]
+    fn test_triple_single_quote() {
+        let tokens = tokenize_line("x = '''docstring'''");
+        assert!(tokens.iter().any(|t| t.text == "'''docstring'''" && t.kind == TokenKind::String));
+    }
+
+    #[test]
+    fn test_triple_quote_unterminated() {
+        let tokens = tokenize_line(r#"x = """this continues"#);
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::String));
     }
 }

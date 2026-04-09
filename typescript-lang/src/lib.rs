@@ -211,7 +211,7 @@ pub extern "C" fn language_id() -> *const std::ffi::c_char {
 
 #[no_mangle]
 pub extern "C" fn file_extensions() -> *const std::ffi::c_char {
-    c"ts,tsx".as_ptr()
+    c"ts".as_ptr()
 }
 
 /// Tokenize a line of TypeScript code. Returns JSON: [{"text":"...","kind":"keyword"}, ...]

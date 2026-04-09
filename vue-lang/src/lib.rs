@@ -296,7 +296,7 @@ fn serde_json_escape(s: &str) -> String {
 }
 
 pub fn lsp_server_command() -> Option<(String, Vec<String>)> {
-    Some(("volar".to_string(), vec!["--stdio".to_string()]))
+    Some(("vue-language-server".to_string(), vec!["--stdio".to_string()]))
 }
 
 #[cfg(test)]
