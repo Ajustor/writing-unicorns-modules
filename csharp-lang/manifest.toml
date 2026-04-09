@@ -1,0 +1,14 @@
+[extension]
+id = "unicorns.csharp-lang"
+name = "C#"
+version = "0.1.0"
+description = "C# language support — syntax highlighting, hover docs, OmniSharp LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["cs", "csx"]
+lsp_server = "OmniSharp"
+lsp_args = ["-lsp"]
+
+[dependencies]

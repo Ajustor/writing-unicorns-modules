@@ -8,5 +8,9 @@ members = [
     "vue-lang",
     "react-lang",
     "svelte-lang",
+    "toml-lang",
+    "xml-lang",
+    "html-lang",
+    "csharp-lang",
 ]
 resolver = "2"

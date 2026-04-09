@@ -1,0 +1,14 @@
+[extension]
+id = "unicorns.toml-lang"
+name = "TOML"
+version = "0.1.0"
+description = "TOML language support — syntax highlighting, taplo LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["toml"]
+lsp_server = "taplo"
+lsp_args = ["lsp", "stdio"]
+
+[dependencies]

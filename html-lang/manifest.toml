@@ -1,0 +1,15 @@
+[extension]
+id = "unicorns.html-lang"
+name = "HTML"
+version = "0.1.0"
+description = "HTML language support — syntax highlighting, hover docs, vscode-html-language-server LSP"
+author = "Writing Unicorns"
+repository = ""
+
+[capabilities]
+languages = ["html", "htm"]
+lsp_server = "vscode-html-language-server"
+lsp_args = ["--stdio"]
+
+[dependencies]
+npm = ["vscode-langservers-extracted"]

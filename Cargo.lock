@@ -3,16 +3,24 @@
 version = 4
 
 [[package]]
+name = "csharp-lang"
+version = "0.1.0"
+
+[[package]]
 name = "go-lang"
 version = "0.1.0"
 
 [[package]]
-name = "javascript-lang"
+name = "html-lang"
 version = "0.1.0"
 
 [[package]]
+name = "javascript-lang"
+version = "0.2.0"
+
+[[package]]
 name = "python-lang"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "react-lang"
@@ -20,16 +28,24 @@ version = "0.1.0"
 
 [[package]]
 name = "rust-lang"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "svelte-lang"
 version = "0.1.0"
 
 [[package]]
-name = "typescript-lang"
+name = "toml-lang"
 version = "0.1.0"
 
 [[package]]
+name = "typescript-lang"
+version = "0.2.0"
+
+[[package]]
 name = "vue-lang"
+version = "0.2.0"
+
+[[package]]
+name = "xml-lang"
 version = "0.1.0"
