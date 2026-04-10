@@ -8,5 +8,8 @@ description = "Rust language support module for Writing Unicorns IDE"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+tree-sitter = "0.25"
+tree-sitter-highlight = "0.25"
+tree-sitter-rust = "0.24"
 
 [dev-dependencies]

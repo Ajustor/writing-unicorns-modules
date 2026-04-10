@@ -1,19 +1,132 @@
-#[derive(Debug, Clone, PartialEq)]
-pub enum TokenKind { Keyword, String, Comment, Number, Macro, Normal, Property }
+use std::sync::OnceLock;
+use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-impl TokenKind {
-    pub fn color_category(&self) -> &'static str {
-        match self {
-            TokenKind::Keyword => "keyword", TokenKind::String => "string",
-            TokenKind::Comment => "comment", TokenKind::Number => "number",
-            TokenKind::Macro => "macro", TokenKind::Normal => "normal",
-            TokenKind::Property => "property",
-        }
+const HIGHLIGHT_NAMES: &[&str] = &[
+    "attribute", "comment", "comment.documentation", "constant", "constant.builtin",
+    "constructor", "function", "function.builtin", "function.macro", "function.method",
+    "keyword", "keyword.function", "keyword.operator", "keyword.return", "keyword.storage",
+    "label", "number", "operator", "property", "punctuation", "punctuation.bracket",
+    "punctuation.delimiter", "string", "string.escape", "string.special",
+    "type", "type.builtin", "variable", "variable.builtin", "variable.parameter",
+];
+
+fn capture_to_kind(idx: usize) -> &'static str {
+    match idx {
+        0 | 8 => "macro",
+        1 | 2 => "comment",
+        3 | 4 | 10 | 11 | 13 | 14 | 28 => "keyword",
+        5 | 25 | 26 => "type",
+        6 | 7 | 9 => "function",
+        16 => "number",
+        18 => "property",
+        22 | 23 | 24 => "string",
+        _ => "normal",
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Token { pub text: String, pub kind: TokenKind }
+static CONFIG: OnceLock<HighlightConfiguration> = OnceLock::new();
+
+fn get_config() -> &'static HighlightConfiguration {
+    CONFIG.get_or_init(|| {
+        let mut cfg = HighlightConfiguration::new(
+            tree_sitter_html::LANGUAGE.into(),
+            "html",
+            tree_sitter_html::HIGHLIGHTS_QUERY,
+            tree_sitter_html::INJECTIONS_QUERY,
+            "",
+        )
+        .expect("tree-sitter-html config");
+        cfg.configure(HIGHLIGHT_NAMES);
+        cfg
+    })
+}
+
+thread_local! {
+    static HL: std::cell::RefCell<Highlighter> =
+        std::cell::RefCell::new(Highlighter::new());
+}
+
+fn document_to_json(source: &str) -> String {
+    let config = get_config();
+    let source_bytes = source.as_bytes();
+    let num_lines = source.lines().count().max(1);
+
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(source_bytes.iter().enumerate().filter_map(|(i, &b)| {
+            if b == b'\n' { Some(i + 1) } else { None }
+        }))
+        .collect();
+
+    let events: Vec<HighlightEvent> = HL.with(|cell| -> Result<Vec<HighlightEvent>, _> {
+        let mut hl = cell.borrow_mut();
+        hl.highlight(config, source_bytes, None, |_| None)?
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .unwrap_or_default();
+
+    let mut line_tokens: Vec<Vec<(String, &'static str)>> = vec![Vec::new(); num_lines];
+    let mut kind_stack: Vec<&'static str> = Vec::new();
+
+    for event in events {
+        match event {
+            HighlightEvent::HighlightStart(h) => kind_stack.push(capture_to_kind(h.0)),
+            HighlightEvent::HighlightEnd => { kind_stack.pop(); }
+            HighlightEvent::Source { start, end } => {
+                if start >= end { continue; }
+                let kind = kind_stack.last().copied().unwrap_or("normal");
+                let text = match source.get(start..end) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let start_line =
+                    line_starts.partition_point(|&s| s <= start).saturating_sub(1);
+                let mut line_idx = start_line;
+                for piece in text.split('\n') {
+                    if line_idx < line_tokens.len() && !piece.is_empty() {
+                        line_tokens[line_idx].push((piece.to_string(), kind));
+                    }
+                    line_idx += 1;
+                }
+            }
+        }
+    }
+
+    for (toks, line_text) in line_tokens.iter_mut().zip(source.lines()) {
+        if toks.is_empty() && !line_text.is_empty() {
+            toks.push((line_text.to_string(), "normal"));
+        }
+    }
+
+    serialize_lines(&line_tokens)
+}
+
+fn serialize_lines(lines: &[Vec<(String, &'static str)>]) -> String {
+    let lines_json: Vec<String> = lines
+        .iter()
+        .map(|toks| {
+            let tok_strs: Vec<String> = toks
+                .iter()
+                .map(|(text, kind)| {
+                    format!(r#"{{"text":{},"kind":"{}"}}"#, json_escape(text), kind)
+                })
+                .collect();
+            format!("[{}]", tok_strs.join(","))
+        })
+        .collect();
+    format!("[{}]", lines_json.join(","))
+}
+
+fn json_escape(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{}\"", escaped)
+}
+
+// ── HTML tag hover docs ───────────────────────────────────────────────────────
 
 const HTML_TAG_DOCS: &[(&str, &str)] = &[
     ("html", "Root element of an HTML document"),
@@ -64,218 +177,62 @@ const HTML_TAG_DOCS: &[(&str, &str)] = &[
     ("iframe", "Inline frame for embedding another document"),
 ];
 
-pub fn tokenize_line(line: &str) -> Vec<Token> {
-    let mut tokens: Vec<Token> = Vec::new();
-    let chars: Vec<char> = line.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+// ── FFI ───────────────────────────────────────────────────────────────────────
 
-    while i < len {
-        // Comment: <!-- ... -->
-        if i + 3 < len && chars[i] == '<' && chars[i+1] == '!' && chars[i+2] == '-' && chars[i+3] == '-' {
-            let start = i;
-            i += 4;
-            while i + 2 < len {
-                if chars[i] == '-' && chars[i+1] == '-' && chars[i+2] == '>' { i += 3; break; }
-                i += 1;
-            }
-            if i >= len { i = len; }
-            tokens.push(Token { text: chars[start..i].iter().collect(), kind: TokenKind::Comment });
-            continue;
-        }
-
-        // DOCTYPE
-        if i + 8 < len && chars[i..i+9].iter().collect::<String>().to_uppercase() == "<!DOCTYPE" {
-            let start = i;
-            while i < len && chars[i] != '>' { i += 1; }
-            if i < len { i += 1; }
-            tokens.push(Token { text: chars[start..i].iter().collect(), kind: TokenKind::Macro });
-            continue;
-        }
-
-        // Tag
-        if chars[i] == '<' {
-            let mut s = String::new();
-            s.push('<');
-            i += 1;
-            if i < len && chars[i] == '/' { s.push('/'); i += 1; }
-            // Tag name
-            while i < len && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_' || chars[i] == ':') {
-                s.push(chars[i]);
-                i += 1;
-            }
-            tokens.push(Token { text: s, kind: TokenKind::Keyword });
-
-            // Attributes inside tag
-            while i < len && chars[i] != '>' {
-                if chars[i].is_whitespace() {
-                    let ws_start = i;
-                    while i < len && chars[i].is_whitespace() { i += 1; }
-                    tokens.push(Token { text: chars[ws_start..i].iter().collect(), kind: TokenKind::Normal });
-                    continue;
-                }
-                if chars[i] == '/' && i + 1 < len && chars[i+1] == '>' {
-                    tokens.push(Token { text: "/>".to_string(), kind: TokenKind::Keyword });
-                    i += 2;
-                    break;
-                }
-                if chars[i].is_alphabetic() || chars[i] == '_' || chars[i] == ':' || chars[i] == '@' || chars[i] == 'v' {
-                    let attr_start = i;
-                    while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-' || chars[i] == ':' || chars[i] == '.' || chars[i] == '@') {
-                        i += 1;
-                    }
-                    tokens.push(Token { text: chars[attr_start..i].iter().collect(), kind: TokenKind::Property });
-                    continue;
-                }
-                if chars[i] == '=' {
-                    tokens.push(Token { text: "=".to_string(), kind: TokenKind::Normal });
-                    i += 1;
-                    continue;
-                }
-                if chars[i] == '"' || chars[i] == '\'' {
-                    let quote = chars[i];
-                    let mut sv = String::new();
-                    sv.push(quote);
-                    i += 1;
-                    while i < len && chars[i] != quote { sv.push(chars[i]); i += 1; }
-                    if i < len { sv.push(chars[i]); i += 1; }
-                    tokens.push(Token { text: sv, kind: TokenKind::String });
-                    continue;
-                }
-                tokens.push(Token { text: chars[i].to_string(), kind: TokenKind::Normal });
-                i += 1;
-            }
-            if i < len && chars[i] == '>' {
-                tokens.push(Token { text: ">".to_string(), kind: TokenKind::Keyword });
-                i += 1;
-            }
-            continue;
-        }
-
-        // Entity
-        if chars[i] == '&' {
-            let start = i;
-            i += 1;
-            while i < len && chars[i] != ';' && !chars[i].is_whitespace() { i += 1; }
-            if i < len && chars[i] == ';' { i += 1; }
-            tokens.push(Token { text: chars[start..i].iter().collect(), kind: TokenKind::Number });
-            continue;
-        }
-
-        // Text
-        let start = i;
-        while i < len && chars[i] != '<' && chars[i] != '&' { i += 1; }
-        if i > start {
-            tokens.push(Token { text: chars[start..i].iter().collect(), kind: TokenKind::Normal });
-        }
-    }
-
-    if tokens.is_empty() && !line.is_empty() {
-        tokens.push(Token { text: line.to_string(), kind: TokenKind::Normal });
-    }
-    tokens
+#[no_mangle]
+pub extern "C" fn language_id() -> *const std::ffi::c_char {
+    c"html".as_ptr()
 }
 
-// ── FFI ──────────────────────────────────────────────────────────────────────
+#[no_mangle]
+pub extern "C" fn file_extensions() -> *const std::ffi::c_char {
+    c"html,htm".as_ptr()
+}
 
 #[no_mangle]
-pub extern "C" fn language_id() -> *const std::ffi::c_char { c"html".as_ptr() }
+pub extern "C" fn reset_tokenizer() {}
 
 #[no_mangle]
-pub extern "C" fn file_extensions() -> *const std::ffi::c_char { c"html,htm".as_ptr() }
+pub unsafe extern "C" fn tokenize_document_ffi(
+    text_ptr: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(text_ptr).to_str().unwrap_or("") };
+    let json = document_to_json(text);
+    std::ffi::CString::new(json).unwrap_or_default().into_raw()
+}
 
 #[no_mangle]
-pub unsafe extern "C" fn tokenize_line_ffi(line_ptr: *const std::ffi::c_char) -> *mut std::ffi::c_char {
-    let line = unsafe { std::ffi::CStr::from_ptr(line_ptr).to_str().unwrap_or("") };
-    let tokens = tokenize_line(line);
-    let json = tokens_to_json(&tokens);
-    std::ffi::CString::new(json).unwrap().into_raw()
+pub extern "C" fn tokenize_line_ffi(
+    _line_ptr: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    std::ptr::null_mut()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn free_string(ptr: *mut std::ffi::c_char) {
-    if !ptr.is_null() { unsafe { drop(std::ffi::CString::from_raw(ptr)) } }
+    if !ptr.is_null() {
+        unsafe { drop(std::ffi::CString::from_raw(ptr)) }
+    }
 }
 
 pub fn hover_info(word: &str, _file_content: &str) -> Option<String> {
-    HTML_TAG_DOCS.iter()
+    HTML_TAG_DOCS
+        .iter()
         .find(|(tag, _)| *tag == word)
         .map(|(tag, desc)| format!("```html\n<{}>\n```\n{}", tag, desc))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hover_info_ffi(word_ptr: *const std::ffi::c_char, content_ptr: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn hover_info_ffi(
+    word_ptr: *const std::ffi::c_char,
+    file_content_ptr: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     let word = unsafe { std::ffi::CStr::from_ptr(word_ptr).to_str().unwrap_or("") };
-    let content = unsafe { std::ffi::CStr::from_ptr(content_ptr).to_str().unwrap_or("") };
+    let content = unsafe { std::ffi::CStr::from_ptr(file_content_ptr).to_str().unwrap_or("") };
     match hover_info(word, content) {
-        Some(s) => std::ffi::CString::new(s).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Some(s) => std::ffi::CString::new(s)
+            .map(|c| c.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
         None => std::ptr::null_mut(),
-    }
-}
-
-pub fn lsp_server_command() -> Option<(String, Vec<String>)> {
-    Some(("vscode-html-language-server".to_string(), vec!["--stdio".to_string()]))
-}
-
-fn tokens_to_json(tokens: &[Token]) -> String {
-    let parts: Vec<String> = tokens.iter().map(|t| {
-        format!(r#"{{"text":{},"kind":"{}"}}"#, serde_json_escape(&t.text), t.kind.color_category())
-    }).collect();
-    format!("[{}]", parts.join(","))
-}
-
-fn serde_json_escape(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
-    format!("\"{}\"", escaped)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_comment() {
-        let tokens = tokenize_line("<!-- comment -->");
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Comment));
-    }
-
-    #[test]
-    fn test_tag() {
-        let tokens = tokenize_line("<div>");
-        assert!(tokens.iter().any(|t| t.text.contains("div") && t.kind == TokenKind::Keyword));
-    }
-
-    #[test]
-    fn test_attribute() {
-        let tokens = tokenize_line(r#"<div class="main">"#);
-        assert!(tokens.iter().any(|t| t.text == "class" && t.kind == TokenKind::Property));
-    }
-
-    #[test]
-    fn test_doctype() {
-        let tokens = tokenize_line("<!DOCTYPE html>");
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Macro));
-    }
-
-    #[test]
-    fn test_entity() {
-        let tokens = tokenize_line("&nbsp;");
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Number));
-    }
-
-    #[test]
-    fn test_self_closing() {
-        let tokens = tokenize_line("<br/>");
-        assert!(tokens.iter().any(|t| t.text == "/>" && t.kind == TokenKind::Keyword));
-    }
-
-    #[test]
-    fn test_hover_div() {
-        assert!(hover_info("div", "").is_some());
-    }
-
-    #[test]
-    fn test_hover_unknown() {
-        assert!(hover_info("zzz", "").is_none());
     }
 }

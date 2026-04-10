@@ -1,214 +1,173 @@
-#[derive(Debug, Clone, PartialEq)]
-pub enum TokenKind { Keyword, KeywordType, String, Comment, Number, Function, Macro, Normal, Property }
+use std::sync::OnceLock;
+use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-impl TokenKind {
-    pub fn color_category(&self) -> &'static str {
-        match self {
-            TokenKind::Keyword => "keyword", TokenKind::KeywordType => "type",
-            TokenKind::String => "string", TokenKind::Comment => "comment",
-            TokenKind::Number => "number", TokenKind::Function => "function",
-            TokenKind::Macro => "macro", TokenKind::Normal => "normal",
-            TokenKind::Property => "property",
-        }
+const HIGHLIGHT_NAMES: &[&str] = &[
+    "attribute", "comment", "comment.documentation", "constant", "constant.builtin",
+    "constructor", "function", "function.builtin", "function.macro", "function.method",
+    "keyword", "keyword.function", "keyword.operator", "keyword.return", "keyword.storage",
+    "label", "number", "operator", "property", "punctuation", "punctuation.bracket",
+    "punctuation.delimiter", "string", "string.escape", "string.special",
+    "type", "type.builtin", "variable", "variable.builtin", "variable.parameter",
+];
+
+fn capture_to_kind(idx: usize) -> &'static str {
+    match idx {
+        0 | 8 => "macro",
+        1 | 2 => "comment",
+        3 | 4 | 10 | 11 | 13 | 14 | 28 => "keyword",
+        5 | 25 | 26 => "type",
+        6 | 7 | 9 => "function",
+        16 => "number",
+        18 => "property",
+        22 | 23 | 24 => "string",
+        _ => "normal",
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Token { pub text: String, pub kind: TokenKind }
+static CONFIG: OnceLock<HighlightConfiguration> = OnceLock::new();
 
-pub fn tokenize_line(line: &str) -> Vec<Token> {
-    let trimmed = line.trim_start();
+fn get_config() -> &'static HighlightConfiguration {
+    CONFIG.get_or_init(|| {
+        let mut cfg = HighlightConfiguration::new(
+            tree_sitter_toml_ng::LANGUAGE.into(),
+            "toml",
+            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        )
+        .expect("tree-sitter-toml config");
+        cfg.configure(HIGHLIGHT_NAMES);
+        cfg
+    })
+}
 
-    // Full-line comment
-    if trimmed.starts_with('#') {
-        return vec![Token { text: line.to_string(), kind: TokenKind::Comment }];
-    }
+thread_local! {
+    static HL: std::cell::RefCell<Highlighter> =
+        std::cell::RefCell::new(Highlighter::new());
+}
 
-    let mut tokens: Vec<Token> = Vec::new();
-    let chars: Vec<char> = line.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+fn document_to_json(source: &str) -> String {
+    let config = get_config();
+    let source_bytes = source.as_bytes();
+    let num_lines = source.lines().count().max(1);
 
-    // Table header: [section] or [[array]]
-    if trimmed.starts_with('[') {
-        tokens.push(Token { text: line.to_string(), kind: TokenKind::Macro });
-        return tokens;
-    }
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(source_bytes.iter().enumerate().filter_map(|(i, &b)| {
+            if b == b'\n' { Some(i + 1) } else { None }
+        }))
+        .collect();
 
-    // Key = value: detect key before '='
-    if let Some(eq_pos) = chars.iter().position(|&c| c == '=') {
-        // Key part (before =)
-        let key: String = chars[..eq_pos].iter().collect();
-        let key_trimmed = key.trim();
-        if !key_trimmed.is_empty() && key_trimmed.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '"' || c == ' ') {
-            tokens.push(Token { text: key.clone(), kind: TokenKind::Property });
-            tokens.push(Token { text: "=".to_string(), kind: TokenKind::Normal });
-            i = eq_pos + 1;
-        }
-    }
+    let events: Vec<HighlightEvent> = HL.with(|cell| -> Result<Vec<HighlightEvent>, _> {
+        let mut hl = cell.borrow_mut();
+        hl.highlight(config, source_bytes, None, |_| None)?
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .unwrap_or_default();
 
-    while i < len {
-        // Inline comment
-        if chars[i] == '#' {
-            tokens.push(Token { text: chars[i..].iter().collect(), kind: TokenKind::Comment });
-            break;
-        }
+    let mut line_tokens: Vec<Vec<(String, &'static str)>> = vec![Vec::new(); num_lines];
+    let mut kind_stack: Vec<&'static str> = Vec::new();
 
-        // Triple-quoted string
-        if (chars[i] == '"' || chars[i] == '\'') && i + 2 < len && chars[i+1] == chars[i] && chars[i+2] == chars[i] {
-            let quote = chars[i];
-            let mut s = String::new();
-            s.push(quote); s.push(quote); s.push(quote);
-            i += 3;
-            loop {
-                if i + 2 < len && chars[i] == quote && chars[i+1] == quote && chars[i+2] == quote {
-                    s.push(quote); s.push(quote); s.push(quote);
-                    i += 3;
-                    break;
+    for event in events {
+        match event {
+            HighlightEvent::HighlightStart(h) => kind_stack.push(capture_to_kind(h.0)),
+            HighlightEvent::HighlightEnd => { kind_stack.pop(); }
+            HighlightEvent::Source { start, end } => {
+                if start >= end { continue; }
+                let kind = kind_stack.last().copied().unwrap_or("normal");
+                let text = match source.get(start..end) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let start_line =
+                    line_starts.partition_point(|&s| s <= start).saturating_sub(1);
+                let mut line_idx = start_line;
+                for piece in text.split('\n') {
+                    if line_idx < line_tokens.len() && !piece.is_empty() {
+                        line_tokens[line_idx].push((piece.to_string(), kind));
+                    }
+                    line_idx += 1;
                 }
-                if i >= len { break; }
-                s.push(chars[i]);
-                i += 1;
             }
-            tokens.push(Token { text: s, kind: TokenKind::String });
-            continue;
         }
-
-        // String
-        if chars[i] == '"' || chars[i] == '\'' {
-            let quote = chars[i];
-            let mut s = String::new();
-            s.push(quote);
-            i += 1;
-            while i < len {
-                let c = chars[i];
-                s.push(c);
-                i += 1;
-                if c == '\\' && i < len { s.push(chars[i]); i += 1; }
-                else if c == quote { break; }
-            }
-            tokens.push(Token { text: s, kind: TokenKind::String });
-            continue;
-        }
-
-        // Number
-        if chars[i].is_ascii_digit() || (chars[i] == '+' || chars[i] == '-') && i + 1 < len && chars[i+1].is_ascii_digit() {
-            let mut s = String::new();
-            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_' || chars[i] == '+' || chars[i] == '-' || chars[i] == ':' || chars[i] == 'T' || chars[i] == 'Z') {
-                s.push(chars[i]);
-                i += 1;
-            }
-            tokens.push(Token { text: s, kind: TokenKind::Number });
-            continue;
-        }
-
-        // Word
-        if chars[i].is_alphabetic() || chars[i] == '_' {
-            let start = i;
-            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-') {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let kind = match word.as_str() {
-                "true" | "false" => TokenKind::Keyword,
-                "inf" | "nan" => TokenKind::KeywordType,
-                _ => TokenKind::Normal,
-            };
-            tokens.push(Token { text: word, kind });
-            continue;
-        }
-
-        // Whitespace/punctuation
-        let start = i;
-        while i < len && !chars[i].is_alphanumeric() && chars[i] != '_' && chars[i] != '"' && chars[i] != '\'' && chars[i] != '#' && !(chars[i] == '+' || chars[i] == '-') {
-            i += 1;
-        }
-        if i > start {
-            tokens.push(Token { text: chars[start..i].iter().collect(), kind: TokenKind::Normal });
-        }
-        if i == start { i += 1; } // safety
     }
 
-    tokens
+    for (toks, line_text) in line_tokens.iter_mut().zip(source.lines()) {
+        if toks.is_empty() && !line_text.is_empty() {
+            toks.push((line_text.to_string(), "normal"));
+        }
+    }
+
+    serialize_lines(&line_tokens)
 }
 
-// ── FFI ──────────────────────────────────────────────────────────────────────
+fn serialize_lines(lines: &[Vec<(String, &'static str)>]) -> String {
+    let lines_json: Vec<String> = lines
+        .iter()
+        .map(|toks| {
+            let tok_strs: Vec<String> = toks
+                .iter()
+                .map(|(text, kind)| {
+                    format!(r#"{{"text":{},"kind":"{}"}}"#, json_escape(text), kind)
+                })
+                .collect();
+            format!("[{}]", tok_strs.join(","))
+        })
+        .collect();
+    format!("[{}]", lines_json.join(","))
+}
+
+fn json_escape(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{}\"", escaped)
+}
+
+// ── FFI ───────────────────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "C" fn language_id() -> *const std::ffi::c_char { c"toml".as_ptr() }
+pub extern "C" fn language_id() -> *const std::ffi::c_char {
+    c"toml".as_ptr()
+}
 
 #[no_mangle]
-pub extern "C" fn file_extensions() -> *const std::ffi::c_char { c"toml".as_ptr() }
+pub extern "C" fn file_extensions() -> *const std::ffi::c_char {
+    c"toml".as_ptr()
+}
 
 #[no_mangle]
-pub unsafe extern "C" fn tokenize_line_ffi(line_ptr: *const std::ffi::c_char) -> *mut std::ffi::c_char {
-    let line = unsafe { std::ffi::CStr::from_ptr(line_ptr).to_str().unwrap_or("") };
-    let tokens = tokenize_line(line);
-    let json = tokens_to_json(&tokens);
-    std::ffi::CString::new(json).unwrap().into_raw()
+pub extern "C" fn reset_tokenizer() {}
+
+#[no_mangle]
+pub unsafe extern "C" fn tokenize_document_ffi(
+    text_ptr: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    let text = unsafe { std::ffi::CStr::from_ptr(text_ptr).to_str().unwrap_or("") };
+    let json = document_to_json(text);
+    std::ffi::CString::new(json).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn tokenize_line_ffi(
+    _line_ptr: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    std::ptr::null_mut()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn free_string(ptr: *mut std::ffi::c_char) {
-    if !ptr.is_null() { unsafe { drop(std::ffi::CString::from_raw(ptr)) } }
+    if !ptr.is_null() {
+        unsafe { drop(std::ffi::CString::from_raw(ptr)) }
+    }
 }
-
-pub fn hover_info(_word: &str, _file_content: &str) -> Option<String> { None }
 
 #[no_mangle]
-pub unsafe extern "C" fn hover_info_ffi(_word_ptr: *const std::ffi::c_char, _file_content_ptr: *const std::ffi::c_char) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn hover_info_ffi(
+    _word_ptr: *const std::ffi::c_char,
+    _file_content_ptr: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
     std::ptr::null_mut()
-}
-
-pub fn lsp_server_command() -> Option<(String, Vec<String>)> {
-    Some(("taplo".to_string(), vec!["lsp".to_string(), "stdio".to_string()]))
-}
-
-fn tokens_to_json(tokens: &[Token]) -> String {
-    let parts: Vec<String> = tokens.iter().map(|t| {
-        format!(r#"{{"text":{},"kind":"{}"}}"#, serde_json_escape(&t.text), t.kind.color_category())
-    }).collect();
-    format!("[{}]", parts.join(","))
-}
-
-fn serde_json_escape(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
-    format!("\"{}\"", escaped)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_comment() {
-        let tokens = tokenize_line("# this is a comment");
-        assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].kind, TokenKind::Comment);
-    }
-
-    #[test]
-    fn test_table_header() {
-        let tokens = tokenize_line("[package]");
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Macro));
-    }
-
-    #[test]
-    fn test_key_value() {
-        let tokens = tokenize_line("name = \"hello\"");
-        assert!(tokens.iter().any(|t| t.text.contains("name") && t.kind == TokenKind::Property));
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::String));
-    }
-
-    #[test]
-    fn test_boolean() {
-        let tokens = tokenize_line("enabled = true");
-        assert!(tokens.iter().any(|t| t.text == "true" && t.kind == TokenKind::Keyword));
-    }
-
-    #[test]
-    fn test_number() {
-        let tokens = tokenize_line("port = 8080");
-        assert!(tokens.iter().any(|t| t.text == "8080" && t.kind == TokenKind::Number));
-    }
 }
