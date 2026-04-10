@@ -14,7 +14,7 @@ fn capture_to_kind(idx: usize) -> &'static str {
     match idx {
         0 | 8 => "macro",
         1 | 2 => "comment",
-        3 | 4 | 10 | 11 | 13 | 14 | 28 => "keyword",
+        3 | 4 | 10 | 11 | 12 | 13 | 14 | 28 => "keyword",
         5 | 25 | 26 => "type",
         6 | 7 | 9 => "function",
         16 => "number",
