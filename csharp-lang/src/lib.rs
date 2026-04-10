@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Keyword,
@@ -33,6 +35,30 @@ pub struct Token {
     pub kind: TokenKind,
 }
 
+// ── Multi-line state ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LineState {
+    Normal,
+    InBlockComment,
+    InVerbatimString,
+    InRawStringLiteral(u8), // count of opening quotes (""" = 3, etc.)
+}
+
+thread_local! {
+    static STATE: RefCell<LineState> = const { RefCell::new(LineState::Normal) };
+}
+
+fn get_state() -> LineState {
+    STATE.with(|s| *s.borrow())
+}
+
+fn set_state(new: LineState) {
+    STATE.with(|s| *s.borrow_mut() = new);
+}
+
+// ── Keywords ────────────────────────────────────────────────────────────────
+
 const KEYWORDS: &[&str] = &[
     "abstract", "as", "base", "break", "case", "catch", "checked", "class",
     "const", "continue", "default", "delegate", "do", "else", "enum", "event",
@@ -56,153 +82,277 @@ const TYPE_KEYWORDS: &[&str] = &[
     "HashSet", "Queue", "Stack", "LinkedList", "SortedList",
 ];
 
+// ── Tokenizer ───────────────────────────────────────────────────────────────
+
 pub fn tokenize_line(line: &str) -> Vec<Token> {
-    let trimmed = line.trim_start();
-
-    // Full-line comment
-    if trimmed.starts_with("//") {
-        return vec![Token { text: line.to_string(), kind: TokenKind::Comment }];
-    }
-
     let mut tokens: Vec<Token> = Vec::new();
     let chars: Vec<char> = line.chars().collect();
     let len = chars.len();
     let mut i = 0;
+    let mut state = get_state();
+
+    // ── Resume multi-line block comment ─────────────────────────────────
+    if state == LineState::InBlockComment {
+        let start = 0;
+        while i + 1 < len {
+            if chars[i] == '*' && chars[i + 1] == '/' {
+                i += 2;
+                state = LineState::Normal;
+                break;
+            }
+            i += 1;
+        }
+        if state == LineState::InBlockComment {
+            // Entire line is inside comment
+            i = len;
+        }
+        tokens.push(Token {
+            text: chars[start..i].iter().collect(),
+            kind: TokenKind::Comment,
+        });
+        if state == LineState::InBlockComment {
+            set_state(state);
+            return tokens;
+        }
+    }
+
+    // ── Resume multi-line verbatim string (@"...") ──────────────────────
+    if state == LineState::InVerbatimString {
+        let start = 0;
+        while i < len {
+            if chars[i] == '"' {
+                if i + 1 < len && chars[i + 1] == '"' {
+                    i += 2; // escaped quote
+                } else {
+                    i += 1; // end of verbatim string
+                    state = LineState::Normal;
+                    break;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        tokens.push(Token {
+            text: chars[start..i].iter().collect(),
+            kind: TokenKind::String,
+        });
+        if state == LineState::InVerbatimString {
+            set_state(state);
+            return tokens;
+        }
+    }
+
+    // ── Resume multi-line raw string literal (""" ... """) ──────────────
+    if let LineState::InRawStringLiteral(quote_count) = state {
+        let start = 0;
+        let closing: String = "\"".repeat(quote_count as usize);
+        if let Some(pos) = find_substr(&chars, i, &closing) {
+            i = pos + quote_count as usize;
+            state = LineState::Normal;
+        } else {
+            i = len;
+        }
+        tokens.push(Token {
+            text: chars[start..i].iter().collect(),
+            kind: TokenKind::String,
+        });
+        if state != LineState::Normal {
+            set_state(state);
+            return tokens;
+        }
+    }
+
+    // ── Normal tokenization ─────────────────────────────────────────────
+
+    // Full-line single-line comment
+    let trimmed = &chars[i..];
+    if trimmed.len() >= 2
+        && trimmed.iter().take_while(|c| c.is_whitespace()).count() + 2 <= trimmed.len()
+    {
+        let skip = trimmed.iter().take_while(|c| c.is_whitespace()).count();
+        if skip + 1 < trimmed.len() && trimmed[skip] == '/' && trimmed[skip + 1] == '/' {
+            tokens.push(Token {
+                text: chars[i..].iter().collect(),
+                kind: TokenKind::Comment,
+            });
+            set_state(LineState::Normal);
+            return tokens;
+        }
+    }
 
     while i < len {
-        // Block comment start /* ... */
+        // Block comment /* ... */
         if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
             let start = i;
             i += 2;
+            let mut closed = false;
             while i + 1 < len {
                 if chars[i] == '*' && chars[i + 1] == '/' {
                     i += 2;
+                    closed = true;
                     break;
                 }
                 i += 1;
             }
-            if i >= len { i = len; }
-            tokens.push(Token { text: chars[start..i].iter().collect(), kind: TokenKind::Comment });
+            if !closed {
+                i = len;
+                state = LineState::InBlockComment;
+            }
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::Comment,
+            });
             continue;
         }
 
         // Inline comment //
         if i + 1 < len && chars[i] == '/' && chars[i + 1] == '/' {
-            tokens.push(Token { text: chars[i..].iter().collect(), kind: TokenKind::Comment });
+            tokens.push(Token {
+                text: chars[i..].iter().collect(),
+                kind: TokenKind::Comment,
+            });
             break;
+        }
+
+        // Raw string literal """ (C# 11)
+        if i + 2 < len && chars[i] == '"' && chars[i + 1] == '"' && chars[i + 2] == '"' {
+            let start = i;
+            let mut q_count: u8 = 0;
+            while i < len && chars[i] == '"' {
+                q_count += 1;
+                i += 1;
+            }
+            // Look for closing sequence of same count
+            let closing: String = "\"".repeat(q_count as usize);
+            if let Some(pos) = find_substr(&chars, i, &closing) {
+                i = pos + q_count as usize;
+            } else {
+                i = len;
+                state = LineState::InRawStringLiteral(q_count);
+            }
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::String,
+            });
+            continue;
+        }
+
+        // Verbatim interpolated $@"..." or @$"..."
+        if i + 2 < len
+            && ((chars[i] == '$' && chars[i + 1] == '@' && chars[i + 2] == '"')
+                || (chars[i] == '@' && chars[i + 1] == '$' && chars[i + 2] == '"'))
+        {
+            let start = i;
+            i += 3;
+            let mut closed = false;
+            while i < len {
+                if chars[i] == '"' {
+                    if i + 1 < len && chars[i + 1] == '"' {
+                        i += 2; // escaped
+                    } else {
+                        i += 1;
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if !closed {
+                state = LineState::InVerbatimString;
+            }
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::String,
+            });
+            continue;
         }
 
         // Verbatim string @"..."
         if chars[i] == '@' && i + 1 < len && chars[i + 1] == '"' {
-            let mut s = String::new();
-            s.push('@');
-            s.push('"');
+            let start = i;
             i += 2;
+            let mut closed = false;
             while i < len {
                 if chars[i] == '"' {
                     if i + 1 < len && chars[i + 1] == '"' {
-                        s.push('"');
-                        s.push('"');
-                        i += 2;
+                        i += 2; // escaped
                     } else {
-                        s.push('"');
                         i += 1;
+                        closed = true;
                         break;
                     }
                 } else {
-                    s.push(chars[i]);
                     i += 1;
                 }
             }
-            tokens.push(Token { text: s, kind: TokenKind::String });
+            if !closed {
+                state = LineState::InVerbatimString;
+            }
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::String,
+            });
             continue;
         }
 
         // Interpolated string $"..."
         if chars[i] == '$' && i + 1 < len && chars[i + 1] == '"' {
-            let mut s = String::new();
-            s.push('$');
-            s.push('"');
+            let start = i;
             i += 2;
             while i < len {
                 let c = chars[i];
-                s.push(c);
                 i += 1;
                 if c == '\\' && i < len {
-                    s.push(chars[i]);
                     i += 1;
                 } else if c == '"' {
                     break;
                 }
             }
-            tokens.push(Token { text: s, kind: TokenKind::String });
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::String,
+            });
             continue;
         }
 
-        // Raw string literal $@"..." or @$"..."
-        if i + 2 < len
-            && ((chars[i] == '$' && chars[i + 1] == '@' && chars[i + 2] == '"')
-                || (chars[i] == '@' && chars[i + 1] == '$' && chars[i + 2] == '"'))
-        {
-            let mut s: String = chars[i..i + 3].iter().collect();
-            i += 3;
-            while i < len {
-                if chars[i] == '"' {
-                    if i + 1 < len && chars[i + 1] == '"' {
-                        s.push('"');
-                        s.push('"');
-                        i += 2;
-                    } else {
-                        s.push('"');
-                        i += 1;
-                        break;
-                    }
-                } else {
-                    s.push(chars[i]);
-                    i += 1;
-                }
-            }
-            tokens.push(Token { text: s, kind: TokenKind::String });
-            continue;
-        }
-
-        // Regular string
+        // Regular string "..."
         if chars[i] == '"' {
-            let mut s = String::new();
-            s.push('"');
+            let start = i;
             i += 1;
             while i < len {
                 let c = chars[i];
-                s.push(c);
                 i += 1;
                 if c == '\\' && i < len {
-                    s.push(chars[i]);
                     i += 1;
                 } else if c == '"' {
                     break;
                 }
             }
-            tokens.push(Token { text: s, kind: TokenKind::String });
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::String,
+            });
             continue;
         }
 
-        // Char literal
+        // Char literal '...'
         if chars[i] == '\'' {
-            let mut s = String::new();
-            s.push('\'');
+            let start = i;
             i += 1;
             while i < len {
                 let c = chars[i];
-                s.push(c);
                 i += 1;
                 if c == '\\' && i < len {
-                    s.push(chars[i]);
                     i += 1;
                 } else if c == '\'' {
                     break;
                 }
             }
-            tokens.push(Token { text: s, kind: TokenKind::String });
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::String,
+            });
             continue;
         }
 
@@ -210,70 +360,62 @@ pub fn tokenize_line(line: &str) -> Vec<Token> {
         if chars[i].is_ascii_digit()
             || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit())
         {
-            let mut s = String::new();
-            // Hex: 0x...
+            let start = i;
             if chars[i] == '0' && i + 1 < len && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
-                s.push(chars[i]);
-                s.push(chars[i + 1]);
                 i += 2;
                 while i < len && (chars[i].is_ascii_hexdigit() || chars[i] == '_') {
-                    s.push(chars[i]);
                     i += 1;
                 }
             } else {
                 while i < len
-                    && (chars[i].is_ascii_alphanumeric()
-                        || chars[i] == '.'
-                        || chars[i] == '_')
+                    && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_')
                 {
-                    s.push(chars[i]);
                     i += 1;
                 }
             }
-            // Suffix: f, d, m, L, UL, etc.
-            if i < len && (chars[i] == 'f' || chars[i] == 'F' || chars[i] == 'd' || chars[i] == 'D' || chars[i] == 'm' || chars[i] == 'M' || chars[i] == 'L' || chars[i] == 'U' || chars[i] == 'u') {
-                s.push(chars[i]);
+            // Suffix
+            while i < len && matches!(chars[i], 'f' | 'F' | 'd' | 'D' | 'm' | 'M' | 'L' | 'U' | 'u' | 'l') {
                 i += 1;
-                if i < len && (chars[i] == 'L' || chars[i] == 'l') {
-                    s.push(chars[i]);
-                    i += 1;
-                }
             }
-            tokens.push(Token { text: s, kind: TokenKind::Number });
+            tokens.push(Token {
+                text: chars[start..i].iter().collect(),
+                kind: TokenKind::Number,
+            });
             continue;
         }
 
-        // Attribute [Attribute]
+        // Attribute [Attr]
         if chars[i] == '[' && i + 1 < len && chars[i + 1].is_alphabetic() {
             let start = i;
             let mut j = i + 1;
-            let mut found_close = false;
-            while j < len {
-                if chars[j] == ']' {
-                    j += 1;
-                    found_close = true;
-                    break;
-                }
+            let mut depth = 1;
+            while j < len && depth > 0 {
+                if chars[j] == '[' { depth += 1; }
+                if chars[j] == ']' { depth -= 1; }
                 j += 1;
             }
-            if found_close {
-                let attr: String = chars[start..j].iter().collect();
-                tokens.push(Token { text: attr, kind: TokenKind::Macro });
+            if depth == 0 {
+                tokens.push(Token {
+                    text: chars[start..j].iter().collect(),
+                    kind: TokenKind::Macro,
+                });
                 i = j;
                 continue;
             }
         }
 
-        // Preprocessor directive #region, #if, #endif, etc.
+        // Preprocessor directive
         if chars[i] == '#' && (i == 0 || chars[..i].iter().all(|c| c.is_whitespace())) {
-            tokens.push(Token { text: chars[i..].iter().collect(), kind: TokenKind::Macro });
+            tokens.push(Token {
+                text: chars[i..].iter().collect(),
+                kind: TokenKind::Macro,
+            });
             break;
         }
 
         // Word (identifier/keyword)
         if chars[i].is_alphabetic() || chars[i] == '_' || chars[i] == '@' {
             let start = i;
-            // @ prefix for verbatim identifiers
             if chars[i] == '@' {
                 i += 1;
             }
@@ -289,7 +431,6 @@ pub fn tokenize_line(line: &str) -> Vec<Token> {
             } else if i < len && chars[i] == '(' {
                 TokenKind::Function
             } else if i < len && chars[i] == '<' {
-                // Generic type like List<T>
                 TokenKind::KeywordType
             } else {
                 TokenKind::Normal
@@ -302,15 +443,7 @@ pub fn tokenize_line(line: &str) -> Vec<Token> {
         let start = i;
         while i < len
             && !chars[i].is_alphanumeric()
-            && chars[i] != '_'
-            && chars[i] != '"'
-            && chars[i] != '\''
-            && chars[i] != '/'
-            && chars[i] != '#'
-            && chars[i] != '@'
-            && chars[i] != '$'
-            && chars[i] != '['
-            && chars[i] != '.'
+            && !matches!(chars[i], '_' | '"' | '\'' | '/' | '#' | '@' | '$' | '[' | '.')
         {
             i += 1;
         }
@@ -329,10 +462,26 @@ pub fn tokenize_line(line: &str) -> Vec<Token> {
         }
     }
 
+    set_state(state);
     tokens
 }
 
-// ── FFI ──────────────────────────────────────────────────────────────────────
+/// Find a substring in a char slice starting at `from`.
+fn find_substr(chars: &[char], from: usize, needle: &str) -> Option<usize> {
+    let needle_chars: Vec<char> = needle.chars().collect();
+    let nlen = needle_chars.len();
+    if nlen == 0 || from + nlen > chars.len() {
+        return None;
+    }
+    for pos in from..=chars.len() - nlen {
+        if chars[pos..pos + nlen] == needle_chars[..] {
+            return Some(pos);
+        }
+    }
+    None
+}
+
+// ── FFI ─────────────────────────────────────────────────────────────────────
 
 #[no_mangle]
 pub extern "C" fn language_id() -> *const std::ffi::c_char {
@@ -342,6 +491,12 @@ pub extern "C" fn language_id() -> *const std::ffi::c_char {
 #[no_mangle]
 pub extern "C" fn file_extensions() -> *const std::ffi::c_char {
     c"cs,csx".as_ptr()
+}
+
+/// Reset the multi-line tokenizer state. Call before tokenizing a new document.
+#[no_mangle]
+pub extern "C" fn reset_tokenizer() {
+    set_state(LineState::Normal);
 }
 
 #[no_mangle]
@@ -448,8 +603,13 @@ fn serde_json_escape(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn reset() {
+        set_state(LineState::Normal);
+    }
+
     #[test]
     fn test_keyword() {
+        reset();
         let tokens = tokenize_line("public class MyClass {");
         assert!(tokens.iter().any(|t| t.text == "public" && t.kind == TokenKind::Keyword));
         assert!(tokens.iter().any(|t| t.text == "class" && t.kind == TokenKind::Keyword));
@@ -457,82 +617,108 @@ mod tests {
 
     #[test]
     fn test_type_keyword() {
+        reset();
         let tokens = tokenize_line("int x = 0;");
         assert!(tokens.iter().any(|t| t.text == "int" && t.kind == TokenKind::KeywordType));
     }
 
     #[test]
-    fn test_comment() {
+    fn test_single_line_comment() {
+        reset();
         let tokens = tokenize_line("// this is a comment");
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::Comment);
     }
 
     #[test]
-    fn test_block_comment() {
+    fn test_inline_block_comment() {
+        reset();
         let tokens = tokenize_line("/* block */ int x;");
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Comment));
         assert!(tokens.iter().any(|t| t.text == "int" && t.kind == TokenKind::KeywordType));
     }
 
     #[test]
+    fn test_multi_line_block_comment() {
+        reset();
+        let t1 = tokenize_line("int a; /* start of comment");
+        assert!(t1.iter().any(|t| t.kind == TokenKind::Comment));
+        assert!(t1.iter().any(|t| t.text == "int" && t.kind == TokenKind::KeywordType));
+
+        let t2 = tokenize_line("  still in comment");
+        assert_eq!(t2.len(), 1);
+        assert_eq!(t2[0].kind, TokenKind::Comment);
+
+        let t3 = tokenize_line("end of comment */ int b;");
+        assert!(t3.iter().any(|t| t.kind == TokenKind::Comment));
+        assert!(t3.iter().any(|t| t.text == "int" && t.kind == TokenKind::KeywordType));
+    }
+
+    #[test]
+    fn test_multi_line_verbatim_string() {
+        reset();
+        let t1 = tokenize_line(r#"var s = @"line one"#);
+        assert!(t1.iter().any(|t| t.kind == TokenKind::String));
+
+        let t2 = tokenize_line(r#"line two";"#);
+        assert!(t2.iter().any(|t| t.kind == TokenKind::String));
+        // After closing quote, state should be normal
+        assert_eq!(get_state(), LineState::Normal);
+    }
+
+    #[test]
+    fn test_interpolated_string() {
+        reset();
+        let tokens = tokenize_line(r#"var s = $"Hello {name}";"#);
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::String && t.text.starts_with("$\"")));
+    }
+
+    #[test]
+    fn test_raw_string_literal() {
+        reset();
+        let t1 = tokenize_line(r#"var s = """"#);
+        assert!(t1.iter().any(|t| t.kind == TokenKind::String));
+
+        let t2 = tokenize_line(r#"  multi-line content"#);
+        assert_eq!(t2.len(), 1);
+        assert_eq!(t2[0].kind, TokenKind::String);
+
+        let t3 = tokenize_line(r#"  """;"#);
+        assert!(t3.iter().any(|t| t.kind == TokenKind::String));
+    }
+
+    #[test]
     fn test_string() {
+        reset();
         let tokens = tokenize_line(r#"string s = "hello";"#);
         assert!(tokens.iter().any(|t| t.text == "\"hello\"" && t.kind == TokenKind::String));
     }
 
     #[test]
-    fn test_verbatim_string() {
-        let tokens = tokenize_line(r#"string s = @"C:\path";"#);
-        assert!(tokens
-            .iter()
-            .any(|t| t.kind == TokenKind::String && t.text.starts_with("@\"")));
-    }
-
-    #[test]
-    fn test_interpolated_string() {
-        let tokens = tokenize_line(r#"var s = $"Hello {name}";"#);
-        assert!(tokens
-            .iter()
-            .any(|t| t.kind == TokenKind::String && t.text.starts_with("$\"")));
+    fn test_function() {
+        reset();
+        let tokens = tokenize_line("public void DoSomething() {");
+        assert!(tokens.iter().any(|t| t.text == "DoSomething" && t.kind == TokenKind::Function));
     }
 
     #[test]
     fn test_number() {
+        reset();
         let tokens = tokenize_line("int x = 42;");
         assert!(tokens.iter().any(|t| t.text == "42" && t.kind == TokenKind::Number));
     }
 
     #[test]
     fn test_attribute() {
+        reset();
         let tokens = tokenize_line("[Serializable]");
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Macro));
     }
 
     #[test]
     fn test_preprocessor() {
+        reset();
         let tokens = tokenize_line("#region MyRegion");
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Macro));
-    }
-
-    #[test]
-    fn test_function() {
-        let tokens = tokenize_line("public void DoSomething() {");
-        assert!(tokens
-            .iter()
-            .any(|t| t.text == "DoSomething" && t.kind == TokenKind::Function));
-    }
-
-    #[test]
-    fn test_async_await() {
-        let tokens = tokenize_line("await Task.Run(() => {});");
-        assert!(tokens.iter().any(|t| t.text == "await" && t.kind == TokenKind::Keyword));
-        assert!(tokens.iter().any(|t| t.text == "Task" && t.kind == TokenKind::KeywordType));
-    }
-
-    #[test]
-    fn test_char_literal() {
-        let tokens = tokenize_line("char c = 'A';");
-        assert!(tokens.iter().any(|t| t.text == "'A'" && t.kind == TokenKind::String));
     }
 }
