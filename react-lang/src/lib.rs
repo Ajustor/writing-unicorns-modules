@@ -61,8 +61,9 @@ fn document_to_json(source: &str) -> String {
 
     let events: Vec<HighlightEvent> = HL.with(|cell| -> Result<Vec<HighlightEvent>, _> {
         let mut hl = cell.borrow_mut();
-        hl.highlight(config, source_bytes, None, |_| None)?
-            .collect::<Result<Vec<_>, _>>()
+        let result = hl.highlight(config, source_bytes, None, |_| None)?
+            .collect::<Result<Vec<_>, _>>();
+        result
     })
     .unwrap_or_default();
 

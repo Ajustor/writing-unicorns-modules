@@ -1,0 +1,101 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            lib_prefix: lib
+            lib_ext: so
+          - os: windows-latest
+            platform: windows
+            lib_prefix: ""
+            lib_ext: dll
+          - os: macos-latest
+            platform: macos
+            lib_prefix: lib
+            lib_ext: dylib
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build all modules (release)
+        run: cargo build --release --workspace
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          for crate in rust-lang typescript-lang javascript-lang python-lang go-lang vue-lang react-lang svelte-lang toml-lang xml-lang html-lang csharp-lang; do
+            lib_name="${{ matrix.lib_prefix }}${crate//-/_}.${{ matrix.lib_ext }}"
+            src="target/release/${lib_name}"
+            dst="dist/${crate}-${{ matrix.platform }}.${{ matrix.lib_ext }}"
+            if [ -f "$src" ]; then
+              cp "$src" "$dst"
+            else
+              echo "Warning: $src not found"
+            fi
+          done
+          ls -la dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: modules-${{ matrix.platform }}
+          path: dist/
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Package per platform
+        run: |
+          cd artifacts
+          for platform in linux windows macos; do
+            dir="modules-${platform}"
+            if [ -d "$dir" ]; then
+              tar -czf "../modules-${platform}.tar.gz" -C "$dir" .
+            fi
+          done
+          ls -la ../*.tar.gz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            modules-linux.tar.gz
+            modules-windows.tar.gz
+            modules-macos.tar.gz
+          generate_release_notes: true

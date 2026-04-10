@@ -31,7 +31,7 @@ fn get_config() -> &'static HighlightConfiguration {
         let mut cfg = HighlightConfiguration::new(
             tree_sitter_c_sharp::LANGUAGE.into(),
             "c_sharp",
-            tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+            include_str!("../queries/highlights.scm"),
             "",
             "",
         )
@@ -59,8 +59,9 @@ fn document_to_json(source: &str) -> String {
 
     let events: Vec<HighlightEvent> = HL.with(|cell| -> Result<Vec<HighlightEvent>, _> {
         let mut hl = cell.borrow_mut();
-        hl.highlight(config, source_bytes, None, |_| None)?
-            .collect::<Result<Vec<_>, _>>()
+        let result = hl.highlight(config, source_bytes, None, |_| None)?
+            .collect::<Result<Vec<_>, _>>();
+        result
     })
     .unwrap_or_default();
 
