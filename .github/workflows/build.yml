@@ -41,21 +41,30 @@ jobs:
       - name: Build all modules (release)
         run: cargo build --release --workspace
 
+      - name: Detect modules from workspace
+        id: modules
+        shell: bash
+        run: |
+          modules=$(sed -n '/members/,/]/p' Cargo.toml | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')
+          echo "list=${modules}" >> "$GITHUB_OUTPUT"
+          echo "Detected modules: ${modules}"
+
       - name: Collect artifacts
         shell: bash
         run: |
           mkdir -p dist
-          for crate in rust-lang typescript-lang javascript-lang python-lang go-lang vue-lang react-lang svelte-lang toml-lang xml-lang html-lang csharp-lang; do
+          for crate in ${{ steps.modules.outputs.list }}; do
+            mkdir -p "dist/${crate}"
+            cp "${crate}/manifest.toml" "dist/${crate}/"
             lib_name="${{ matrix.lib_prefix }}${crate//-/_}.${{ matrix.lib_ext }}"
             src="target/release/${lib_name}"
-            dst="dist/${crate}-${{ matrix.platform }}.${{ matrix.lib_ext }}"
             if [ -f "$src" ]; then
-              cp "$src" "$dst"
+              cp "$src" "dist/${crate}/"
             else
               echo "Warning: $src not found"
             fi
           done
-          ls -la dist/
+          ls -laR dist/
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -80,22 +89,38 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Package per platform
+      - name: Detect modules from workspace
+        id: modules
         run: |
-          cd artifacts
-          for platform in linux windows macos; do
-            dir="modules-${platform}"
-            if [ -d "$dir" ]; then
-              tar -czf "../modules-${platform}.tar.gz" -C "$dir" .
-            fi
+          modules=$(sed -n '/members/,/]/p' Cargo.toml | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')
+          echo "list=${modules}" >> "$GITHUB_OUTPUT"
+
+      - name: Package per module
+        run: |
+          mkdir -p release
+          for crate in ${{ steps.modules.outputs.list }}; do
+            mkdir -p "release/${crate}"
+            # Copy manifest.toml from any platform (identical across all)
+            for platform in linux windows macos; do
+              manifest="artifacts/modules-${platform}/${crate}/manifest.toml"
+              if [ -f "$manifest" ]; then
+                cp "$manifest" "release/${crate}/"
+                break
+              fi
+            done
+            # Copy platform libraries
+            for platform_dir in artifacts/modules-*/; do
+              find "${platform_dir}${crate}" -maxdepth 1 -type f \
+                \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" \) \
+                -exec cp {} "release/${crate}/" \; 2>/dev/null || true
+            done
+            # Create zip
+            (cd release && zip -r "../${crate}.zip" "${crate}/")
           done
-          ls -la ../*.tar.gz
+          ls -la *.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            modules-linux.tar.gz
-            modules-windows.tar.gz
-            modules-macos.tar.gz
+          files: "*.zip"
           generate_release_notes: true
