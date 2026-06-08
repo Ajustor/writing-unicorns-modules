@@ -1,14 +1,17 @@
 [extension]
 id = "unicorns.csharp-lang"
 name = "C#"
-version = "0.1.0"
-description = "C# language support — syntax highlighting, hover docs, OmniSharp LSP"
+version = "0.2.0"
+description = "C# language support — syntax highlighting, hover docs, csharp-ls LSP"
 author = "Writing Unicorns"
 repository = ""
 
 [capabilities]
 languages = ["cs", "csx"]
-lsp_server = "OmniSharp"
-lsp_args = ["-lsp"]
+lsp_server = "csharp-ls"
+lsp_args = []
 
 [dependencies]
+# Auto-installed on module install (requires the .NET SDK).
+# Version pinned: the latest csharp-ls package is currently broken on NuGet.
+dotnet = ["csharp-ls@0.16.0"]

@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "csharp-lang"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tree-sitter",
  "tree-sitter-c-sharp",
